@@ -118,16 +118,7 @@ namespace Certify.Providers.DNS.GoDaddy
         {
             List<DnsRecord> records = new List<DnsRecord>();
 
-            string[] domains = zoneName.Split(new char[] { '.' });
-            string tldName = domains[domains.Length - 2] + "." + domains[domains.Length - 1];
-            string sub = "";
-
-            for (int i = 0; i < domains.Length - 1; i++)
-            {
-                sub += domains[i];
-            }
-
-            var request = CreateRequest(HttpMethod.Get, $"{string.Format(_listRecordsUri, tldName, "TXT")}");
+            var request = CreateRequest(HttpMethod.Get, $"{string.Format(_listRecordsUri, zoneName, "TXT")}");
 
             var result = await _client.SendAsync(request);
 
@@ -136,11 +127,11 @@ namespace Certify.Providers.DNS.GoDaddy
                 var content = await result.Content.ReadAsStringAsync();
                 var dnsResult = JsonConvert.DeserializeObject<DnsRecordGoDaddy[]>(content);
 
-                records.AddRange(dnsResult.Select(x => new DnsRecord { RecordId = x.name, RecordName = x.name, RecordType = x.type, RecordValue = x.data }));
+                records.AddRange(dnsResult.Select(x => new DnsRecord { RecordId = x.name, RecordName = x.name, RecordType = x.type, RecordValue = x.data, RecordTtl = x.ttl }));
             }
             else
             {
-                throw new Exception($"Could not get DNS records for zone {tldName}. Result: {result.StatusCode} - {await result.Content.ReadAsStringAsync()}");
+                throw new Exception($"Could not get DNS records for zone {zoneName}. Result: {result.StatusCode} - {await result.Content.ReadAsStringAsync()}");
             }
 
             return records;
@@ -213,31 +204,37 @@ namespace Certify.Providers.DNS.GoDaddy
 
         public async Task<ActionResult> CreateRecord(DnsRecord request)
         {
-            //check if record already exists
-            string[] domains = request.RecordName.Split(new char[] { '.' });
-            string tldName = domains[domains.Length - 2] + "." + domains[domains.Length - 1];
-            string sub = "";
-            for (int i = 0; i < domains.Length - 2; i++)
-            {
-                if (i == 0)
-                {
-                    sub += domains[i];
-                }
-                else
-                {
-                    sub += "." + domains[i];
-                }
-            }
+            DnsZone zone = await GetZone(request.ZoneId);
+            string subdomain = GetSubdomain(request, zone);
 
-            return await AddDnsRecord(tldName, sub, request.RecordValue);
+            var record = (await GetDnsRecords(zone.Name)).FirstOrDefault(x => x.RecordName == subdomain);
+
+            if (record == null)
+            {
+                return await AddDnsRecord(
+                    zone.Name,
+                    subdomain,
+                    request.RecordValue
+                );
+            } else
+            {
+                return await UpdateDnsRecord(
+                    zone.Name,
+                    record,
+                    request.RecordValue
+                );
+            }
         }
 
         public async Task<ActionResult> DeleteRecord(DnsRecord request)
         {
             // grab all the txt records for the zone as a json array, remove the txt record in
             // question, and send an update command.
-            var domainrecords = await GetDnsRecords(request.RootDomain);
-            var record = domainrecords.FirstOrDefault(x => x.RecordName + "." + request.RootDomain == request.RecordName + "." + request.TargetDomainName);
+            DnsZone zone = await GetZone(request.ZoneId);
+            string subdomain = GetSubdomain(request, zone);
+
+            var domainrecords = await GetDnsRecords(zone.Name);
+            var record = domainrecords.FirstOrDefault(x => x.RecordName == subdomain);
             if (record == null)
             {
                 return new ActionResult { IsSuccess = true, Message = "DNS record does not exist, nothing to delete." };
@@ -245,11 +242,16 @@ namespace Certify.Providers.DNS.GoDaddy
 
             domainrecords.Remove(record);
 
-            var req = CreateRequest(HttpMethod.Put, string.Format(_deleteRecordUri, request.RootDomain, "TXT"));
+            var req = CreateRequest(HttpMethod.Put, string.Format(_deleteRecordUri, zone.Name, "TXT"));
 
             req.Content = new StringContent(
-                JsonConvert.SerializeObject(domainrecords)
-                );
+                JsonConvert.SerializeObject(domainrecords.ConvertAll(x => new DnsRecordGoDaddy{
+                    data = x.RecordValue,
+                    type = x.RecordType,
+                    name = x.RecordName,
+                    ttl  = x.RecordTtl
+                }))
+            );
             req.Content.Headers.ContentType.MediaType = "application/json";
 
             var result = await _client.SendAsync(req);
@@ -294,10 +296,29 @@ namespace Certify.Providers.DNS.GoDaddy
             return zones;
         }
 
+        private async Task<DnsZone> GetZone(string zoneId)
+        {
+            var zone = (await GetZones()).FirstOrDefault(x => x.ZoneId == zoneId);
+
+            //Do the request here instead and provide better error
+            if (zone == null)
+            {
+                throw new Exception($"Zone with id {zoneId} does not exist.");
+            }
+
+            return zone;
+        }
+
+        private string GetSubdomain(DnsRecord record, DnsZone zone)
+        {
+            return record.RecordName.Substring(0, record.RecordName.IndexOf(zone.Name) - 1);
+        }
+
         public async Task<bool> InitProvider(ILog log = null)
         {
             _log = log;
             return await Task.FromResult(true);
         }
+
     }
 }

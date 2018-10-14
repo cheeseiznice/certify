@@ -23,6 +23,8 @@ namespace Certify.Models.Providers
 
         public string RecordName { get; set; }
         public string RecordValue { get; set; }
+
+        public int RecordTtl { get; set; } = 600;
     }
 
     public interface IDnsProvider
